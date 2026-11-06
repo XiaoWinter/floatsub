@@ -1,0 +1,6 @@
+comtypes>=1.4.0
+pycaw>=20240210
+psutil>=6.0
+python-dotenv>=1.0
+google-genai>=1.0
+customtkinter>=6.0
