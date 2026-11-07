@@ -1,6 +1,6 @@
 import unittest
 
-from floatsub.caption_text import CaptionPager, latest_line, merge_text
+from floatsub.caption_text import CaptionPager, CrawlSheet, SentenceLog, latest_line, merge_text, zip_lines
 from floatsub.gemini_live import LiveCaptions
 
 
@@ -72,6 +72,79 @@ class CaptionTextTests(unittest.TestCase):
         captions.add_target("你好", False)
         captions.add_target("你好世界", False)
         self.assertEqual(captions.visible()[1], "你好世界")
+
+
+class SteadyScrollTests(unittest.TestCase):
+    def test_the_first_line_appears_on_the_bottom_row(self):
+        sheet = CrawlSheet(3)
+        sheet.append_lines(["你好"])
+        self.assertEqual(sheet.lines[:2], ["", ""])
+        self.assertEqual(sheet.lines[2], "你好")
+        self.assertEqual(sheet.scroll, 0)
+
+    def test_movement_equals_the_requested_distance(self):
+        sheet = CrawlSheet(3)
+        sheet.append_lines(["你好"])
+        sheet.tick(0.2)
+        sheet.tick(0.2)
+        self.assertAlmostEqual(sheet.scroll, 0.4)
+        sheet.tick(1.5)
+        self.assertAlmostEqual(sheet.scroll, 1.9)
+
+    def test_a_pause_adds_blank_lines_without_speeding_up(self):
+        sheet = CrawlSheet(3)
+        sheet.append_lines(["你好"])
+        sheet.tick(2)
+        self.assertAlmostEqual(sheet.scroll, 2)
+        self.assertEqual(sheet.lines[-1], "")
+
+    def test_translation_and_source_share_a_row(self):
+        self.assertEqual(zip_lines(["你好。", "第二行"], ["hello"]), [("你好。", "hello"), ("第二行", "")])
+        sheet = CrawlSheet(3)
+        sheet.append_rows(zip_lines(["你好。"], ["hello"]))
+        self.assertEqual(sheet.lines[2], ("你好。", "hello"))
+
+    def test_a_burst_waits_below_and_the_speed_stays_put(self):
+        sheet = CrawlSheet(3)
+        sheet.append_lines(["第一"])
+        sheet.tick(0.3)
+        sheet.append_lines(["第二", "第三", "第四"])
+        self.assertAlmostEqual(sheet.scroll, 0.3)
+        self.assertEqual(sheet.lines[-3:], ["第二", "第三", "第四"])
+
+
+class SentenceLogTests(unittest.TestCase):
+    def test_an_open_fragment_stays_off_the_page(self):
+        log = SentenceLog()
+        self.assertEqual(log.push("你好"), "")
+        self.assertEqual(log.push("你好世界"), "")
+        self.assertEqual(log.transcript, "")
+
+    def test_a_finished_sentence_stays_and_the_next_one_joins_it(self):
+        log = SentenceLog()
+        self.assertEqual(log.push("今天天气很好。"), "今天天气很好。")
+        self.assertEqual(log.push("今天天气很好。我们出门"), "")
+        self.assertEqual(log.push("今天天气很好。我们出门吧。"), "我们出门吧。")
+        self.assertEqual(log.transcript, "今天天气很好。我们出门吧。")
+
+    def test_a_closed_utterance_is_appended_without_punctuation(self):
+        log = SentenceLog()
+        self.assertEqual(log.push("我们出门", closed=True), "我们出门")
+        self.assertEqual(log.push("顺便买点东西。"), "顺便买点东西。")
+        self.assertEqual(log.transcript, "我们出门顺便买点东西。")
+
+    def test_repeating_the_same_snapshot_does_not_duplicate(self):
+        log = SentenceLog()
+        log.push("今天天气很好。")
+        self.assertEqual(log.push("今天天气很好。"), "")
+        self.assertEqual(log.push("今天天气很好。", closed=True), "")
+        self.assertEqual(log.transcript, "今天天气很好。")
+
+    def test_a_later_utterance_keeps_the_earlier_text(self):
+        log = SentenceLog()
+        log.push("第一句。", closed=True)
+        log.push("第二句。", closed=True)
+        self.assertEqual(log.transcript, "第一句。第二句。")
 
 
 if __name__ == "__main__":

@@ -25,7 +25,7 @@ BAR_H = 56
 EDGE = 40
 _EDGE_GAP = 6
 _EDGE_PAD = 10
-_SWITCH_GAP = 4
+_SPEED_GAP = 8
 
 
 def _menu_colors() -> dict:
@@ -47,7 +47,7 @@ def fold_corner(width: int) -> tuple[int, int]:
 
 
 class Toolbar:
-    def __init__(self, root, *, app_label, provider, heard, written, keep, quiet, on_keep, on_provider, on_languages, on_quiet, on_listen, on_refresh, on_collapse, on_close, bind_drag):
+    def __init__(self, root, *, app_label, provider, heard, written, speed, on_speed, quiet, on_provider, on_languages, on_quiet, on_listen, on_refresh, on_collapse, on_close, bind_drag):
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("dark-blue")
         ctk.set_widget_scaling(1.0)
@@ -86,7 +86,6 @@ class Toolbar:
         ctk.CTkButton(
             row, text="⟳", command=on_refresh, font=text, width=36, height=32, fg_color=CHIP, hover_color=ACCENT
         ).pack(side="left", padx=(4, 12))
-        ctk.CTkLabel(row, text="选择模型", font=small, text_color=MUTED).pack(side="left", padx=(0, 6))
         ctk.CTkOptionMenu(
             row,
             values=["Gemini", "千问"],
@@ -147,27 +146,32 @@ class Toolbar:
             dynamic_resizing=False,
             **_menu_colors(),
         ).pack(side="left")
-        self.save_label = ctk.CTkLabel(frame, text="保存", font=small, text_color=MUTED)
-        self.keep_switch = ctk.CTkSwitch(
-            frame,
-            text="",
-            variable=keep,
-            command=on_keep,
-            onvalue=True,
-            offvalue=False,
-            width=46,
-            switch_width=40,
-            switch_height=22,
-            progress_color=ACCENT,
-            button_color="#f3e6d8",
-            button_hover_color="#fff7ef",
-            fg_color="#5a4336",
-        )
-        self.keep_switch._text_label.grid_remove()
-        self.save_label.bind("<Button-1>", lambda _event: self.keep_switch.toggle())
+        self.speed_box = ctk.CTkFrame(frame, fg_color="transparent")
+        ctk.CTkLabel(self.speed_box, text="速度", font=small, text_color=MUTED).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(
+            self.speed_box,
+            text="−",
+            command=lambda: on_speed(-1),
+            font=text,
+            width=28,
+            height=28,
+            fg_color=CHIP,
+            hover_color=ACCENT,
+        ).pack(side="left")
+        ctk.CTkLabel(self.speed_box, textvariable=speed, font=small, text_color=INK, width=42).pack(side="left", padx=4)
+        ctk.CTkButton(
+            self.speed_box,
+            text="+",
+            command=lambda: on_speed(1),
+            font=text,
+            width=28,
+            height=28,
+            fg_color=CHIP,
+            hover_color=ACCENT,
+        ).pack(side="left")
 
         self.fold = ctk.CTkButton(
-            frame, text="收", command=on_collapse, font=text, width=EDGE, height=EDGE, fg_color=CHIP, hover_color=ACCENT
+            frame, text="−", command=on_collapse, font=text, width=EDGE, height=EDGE, fg_color=CHIP, hover_color=ACCENT
         )
         self.close = ctk.CTkButton(
             frame, text="×", command=on_close, font=text, width=EDGE, height=EDGE, fg_color=CHIP, hover_color=ACCENT
@@ -186,13 +190,10 @@ class Toolbar:
         self.fold.place(x=fold_x, y=y)
         self.close.place(x=close_x, y=y)
         self.win.update_idletasks()
-        switch_w = self.keep_switch.winfo_reqwidth()
-        label_w = self.save_label.winfo_reqwidth()
-        switch_x = fold_x - _SWITCH_GAP - switch_w
-        label_x = switch_x - _SWITCH_GAP - label_w
-        self.keep_switch.place(x=switch_x, y=(BAR_H - self.keep_switch.winfo_reqheight()) // 2)
-        self.save_label.place(x=label_x, y=(BAR_H - self.save_label.winfo_reqheight()) // 2)
-        self._row.pack_configure(padx=(12, width - label_x + 8))
+        speed_w = self.speed_box.winfo_reqwidth()
+        speed_x = fold_x - _SPEED_GAP - speed_w
+        self.speed_box.place(x=speed_x, y=(BAR_H - self.speed_box.winfo_reqheight()) // 2)
+        self._row.pack_configure(padx=(12, width - speed_x + 8))
 
     def show(self, x: int, y: int, width: int) -> None:
         self.layout_edges(width)

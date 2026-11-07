@@ -3,11 +3,12 @@ import threading
 import time
 import tkinter as tk
 
-from floatsub.caption_text import CaptionPager
+from floatsub.caption_text import CrawlSheet, SentenceLog, _join_paragraph
 from floatsub.debug_feed import DebugPanel, TimedInbox
 from floatsub.capture import ProcessCapture
 from floatsub.chrome import (
     ACCENT,
+    BAR,
     BAR_H,
     EDGE,
     FONT,
@@ -33,6 +34,8 @@ _BODY_H = 196
 _MIN_W = 1200
 _MIN_H = 120
 _BALL_SIZE = 52
+_SPEEDS = (30, 50, 70, 90, 110, 130)
+_CRAWL_INTERVAL_MS = 50
 
 
 class Overlay:
@@ -71,16 +74,25 @@ class Overlay:
         self.languages = (heard, written)
         self.heard_label = tk.StringVar(value=heard.label)
         self.written_label = tk.StringVar(value=written.label)
-        self.keep = tk.BooleanVar(value=bool(state.get("save")))
-        self.keep_records = bool(self.keep.get())
+        self._crawl_speed = _crawl_speed(state.get("speed"))
+        self.speed_label = tk.StringVar(value=str(self._crawl_speed))
         self.quiet_label = tk.StringVar(value=quiet_label(int(state.get("quiet") or 30)))
         self.app_label = tk.StringVar(value="选择正在出声的应用")
         self.status = tk.StringVar(value="选一个应用，再开始听。")
-        self.translation = tk.StringVar(value="")
-        self.source = tk.StringVar(value="")
-        self._translation_page = CaptionPager()
-        self._source_page = CaptionPager()
-        self._caption_job = None
+        self._sentences = SentenceLog()
+        self._source_log = SentenceLog()
+        self._sheet = CrawlSheet(3)
+        self._scroll = 0.0
+        self._held_written = ""
+        self._held_heard = ""
+        self._blocks: list[tuple[str, str]] = []
+        self._show_source = False
+        measure = tk.font.Font(root=self.root, family=FONT, size=22)
+        self._line_px = max(1, measure.metrics("linespace"))
+        self._measure = measure.measure
+        self._crawl_job = None
+        self._crawl_at = 0.0
+        self._crawl_pending = 0.0
 
         self.toolbar = Toolbar(
             self.root,
@@ -88,9 +100,9 @@ class Overlay:
             provider=self.provider,
             heard=self.heard_label,
             written=self.written_label,
-            keep=self.keep,
+            speed=self.speed_label,
+            on_speed=self._step_speed,
             quiet=self.quiet_label,
-            on_keep=self._toggle_keep,
             on_provider=lambda _choice: self._save(),
             on_languages=self._apply_languages,
             on_quiet=self._apply_quiet,
@@ -106,32 +118,30 @@ class Overlay:
         body = tk.Frame(self.panel, bg=GLASS)
         body.pack(fill="both", expand=True, padx=16, pady=(10, 14))
         self._bind_drag(body)
-        self.translation_label = tk.Label(
-            body,
-            textvariable=self.translation,
-            bg=GLASS,
-            fg=INK,
-            font=(FONT, 22),
-            height=2,
-            wraplength=self._width - 40,
-            justify="left",
-            anchor="nw",
+        band = tk.Frame(body, bg=GLASS)
+        band.pack(fill="x")
+        self._bind_drag(band)
+        self._clean_button = tk.Label(
+            band, text="clean", bg=BAR, fg=INK, font=(FONT, 12), cursor="hand2", padx=4, pady=0
         )
-        self.translation_label.pack(fill="x")
-        self._bind_drag(self.translation_label)
-        self.source_label = tk.Label(
-            body,
-            textvariable=self.source,
-            bg=GLASS,
-            fg=MUTED,
-            font=(FONT, 15),
-            height=2,
-            wraplength=self._width - 40,
-            justify="left",
-            anchor="nw",
+        self._source_button = tk.Label(
+            band, text="原", bg=BAR, fg=MUTED, font=(FONT, 12), cursor="hand2", padx=4, pady=0
         )
-        self.source_label.pack(fill="x", pady=(18, 0))
-        self._bind_drag(self.source_label)
+        self._clean_button.pack(side="right", anchor="n", padx=(6, 0))
+        self._source_button.pack(side="right", anchor="n", padx=(6, 0))
+        self._clean_button.bind("<Button-1>", self._clear_captions)
+        self._source_button.bind("<Button-1>", self._toggle_source)
+        self.caption = tk.Canvas(
+            band,
+            height=self._line_px * 3,
+            bg=GLASS,
+            highlightthickness=0,
+            bd=0,
+            cursor="arrow",
+        )
+        self.caption.pack(side="left", fill="both", expand=True)
+        self._bind_drag(self.caption)
+        self.caption.bind("<MouseWheel>", self._scroll_transcript)
         status_row = tk.Frame(body, bg=GLASS)
         status_row.pack(fill="x", pady=(8, 0))
         self._bind_drag(status_row)
@@ -221,18 +231,7 @@ class Overlay:
             self._place_debug()
 
     def _apply_wrap(self):
-        width = max(200, self._width - 40)
-        self.translation_label.configure(wraplength=width)
-        self.source_label.configure(wraplength=width)
         self.status_label.configure(wraplength=max(160, self._width - 88))
-        for child in self.translation_label.master.winfo_children():
-            if child is self.translation_label:
-                continue
-            try:
-                if child.cget("textvariable"):
-                    child.configure(wraplength=width)
-            except tk.TclError:
-                pass
 
     def _collapse(self):
         if self.collapsed:
@@ -304,18 +303,20 @@ class Overlay:
         self._ball_hwnd = window_handle(self.ball)
         self._grabbed = event.widget
         event.widget.grab_set()
+        return "break"
 
     def _drag_move(self, event):
         if abs(event.x_root - self._press_x) + abs(event.y_root - self._press_y) <= 6:
-            return
+            return "break"
         self._moved = True
         self._place_x = event.x_root - self._drag_x
         self._place_y = event.y_root - self._drag_y
         if time.perf_counter() - self._last_flush < 0.008:
             if self._move_job is None:
                 self._move_job = self.root.after(8, self._flush_move)
-            return
+            return "break"
         self._flush_move()
+        return "break"
 
     def _flush_move(self):
         self._move_job = None
@@ -348,6 +349,7 @@ class Overlay:
             self._blur_paused = False
             self._place_at(int(self._place_x), int(self._place_y))
         self._save()
+        return "break"
 
     def _resize_start(self, event):
         self._resize_x = event.x_root
@@ -414,10 +416,8 @@ class Overlay:
         self._show_listen_button(True)
         self._paint_ball()
         self.status.set(f"正在听 {target.name}。字幕跟着说话走。")
-        self.translation.set("")
-        self.source.set("")
-        self._translation_page.reset()
-        self._source_page.reset()
+        self._reset_captions()
+        self._start_crawl()
         self.stop_listen.clear()
         self.worker = threading.Thread(
             target=self._listen_live,
@@ -455,7 +455,7 @@ class Overlay:
                         self.inbox,
                         lambda: self._live_target(provider),
                         problem=lambda: capture.error,
-                        save_enabled=lambda: self.keep_records,
+                        save_enabled=lambda: False,
                         app_name=app_name,
                         pid=pid,
                     )
@@ -480,56 +480,133 @@ class Overlay:
             return written.live or "zh-Hans"
         return written.qwen or "zh"
 
-    def _caption_limit(self, points: int, lines: int) -> int:
-        """按实际字宽算两行能放下多少字，避免折成三行。"""
-        key = (points, self._width, lines)
-        cached = getattr(self, "_caption_limits", None)
-        if cached is None:
-            cached = {}
-            self._caption_limits = cached
-        if key in cached:
-            return cached[key]
-        measure = tk.font.Font(root=self.root, family=FONT, size=points).measure("字")
-        px = measure if measure > 0 else int(round(points * 96 / 72))
-        per_line = max(8, (self._width - 40) // px)
-        cached[key] = per_line * lines
-        return cached[key]
-
-    def _show_caption(self, zh: str, source: str) -> None:
-        now = time.monotonic()
-        shown = self._translation_page.push(zh, self._caption_limit(22, 1), now)
-        heard = self._source_page.push(source, self._caption_limit(15, 1), now)
-        self._paint_caption(shown, heard)
-        self._arm_caption_hold(now)
-
-    def _paint_caption(self, shown: str, heard: str) -> None:
-        self.translation.set(shown)
-        self.source.set(heard)
-
-    def _arm_caption_hold(self, now: float) -> None:
-        waits = []
-        for page, points in ((self._translation_page, 22), (self._source_page, 15)):
-            delay = page.next_clear_in(self._caption_limit(points, 1), now)
-            if delay is not None:
-                waits.append(delay)
-        if self._caption_job is not None:
-            self.root.after_cancel(self._caption_job)
-            self._caption_job = None
-        if not waits:
+    def _show_caption(self, zh: str, source: str, closed: bool) -> None:
+        written = self._sentences.push(zh, closed)
+        heard = self._source_log.push(source, closed)
+        if written:
+            self._held_written = _join_paragraph(self._held_written, written)
+        if heard:
+            self._held_heard = _join_paragraph(self._held_heard, heard)
+        if not (closed or (self._held_written and self._held_heard)):
             return
-        self._caption_job = self.root.after(max(50, int(min(waits) * 1000) + 40), self._release_caption)
+        block = (self._held_written, self._held_heard)
+        self._held_written = ""
+        self._held_heard = ""
+        self._blocks.append(block)
+        self._append_visible(block)
+        self._redraw_caption()
 
-    def _release_caption(self) -> None:
-        self._caption_job = None
+    def _visible_text(self, block: tuple[str, str]) -> str:
+        written, heard = block
+        return heard if self._show_source else written
+
+    def _append_visible(self, block: tuple[str, str]) -> None:
+        lines = self._wrap_caption(self._visible_text(block))
+        if lines:
+            self._sheet.append_lines(lines)
+
+    def _rebuild_visible(self) -> None:
+        scroll = self._scroll
+        self._sheet.reset()
+        for block in self._blocks:
+            self._append_visible(block)
+        self._scroll = scroll
+        if self._sheet.ready:
+            self._sheet.follow(self._scroll)
+        self._redraw_caption()
+
+    def _toggle_source(self, _event=None):
+        self._show_source = not self._show_source
+        if self._show_source:
+            self._source_button.configure(bg=ACCENT, fg="#ffffff")
+        else:
+            self._source_button.configure(bg=BAR, fg=MUTED)
+        self._rebuild_visible()
+        return "break"
+
+    def _clear_captions(self, _event=None):
+        self._reset_captions()
+        return "break"
+
+    def _reset_captions(self) -> None:
+        self._sentences.reset()
+        self._source_log.reset()
+        self._sheet.reset()
+        self._held_written = ""
+        self._held_heard = ""
+        self._blocks.clear()
+        self._scroll = 0.0
+        self.caption.delete("line")
+
+    def _start_crawl(self) -> None:
+        self._crawl_at = time.monotonic()
+        self._crawl_pending = 0.0
+        if self._crawl_job is not None:
+            self.root.after_cancel(self._crawl_job)
+        self._crawl_job = self.root.after(_CRAWL_INTERVAL_MS, self._crawl)
+
+    def _stop_crawl(self) -> None:
+        if self._crawl_job is not None:
+            self.root.after_cancel(self._crawl_job)
+            self._crawl_job = None
+
+    def _crawl(self) -> None:
+        self._crawl_job = None
+        if not self.listening:
+            return
         now = time.monotonic()
-        shown = self._translation_page.tick(self._caption_limit(22, 1), now)
-        heard = self._source_page.tick(self._caption_limit(15, 1), now)
-        self._paint_caption(shown, heard)
-        self._arm_caption_hold(now)
+        elapsed = min(0.25, max(0.0, now - self._crawl_at))
+        self._crawl_at = now
+        if self._sheet.ready:
+            self._crawl_pending += self._crawl_speed * elapsed
+            distance = self._crawl_pending / self._line_px
+            if distance > 0:
+                self._crawl_pending = 0.0
+                self._scroll += distance
+                self._sheet.follow(self._scroll)
+                self._redraw_caption()
+        self._crawl_job = self.root.after(_CRAWL_INTERVAL_MS, self._crawl)
+
+    def _redraw_caption(self) -> None:
+        self.caption.delete("line")
+        height = self._line_px * 3
+        for index, line in enumerate(self._sheet.lines):
+            text = line if isinstance(line, str) else ""
+            if not text:
+                continue
+            top = (index - self._sheet.scroll) * self._line_px
+            if top >= height or top + self._line_px <= 0:
+                continue
+            self.caption.create_text(0, top, anchor="nw", text=text, fill=INK, font=(FONT, 22), tags="line")
+
+    def _wrap_caption(self, text: str) -> list[str]:
+        limit = self.caption.winfo_width()
+        if limit < 80:
+            limit = max(80, self._width - 80)
+        lines = []
+        current = ""
+        for char in text:
+            trial = current + char
+            if current and self._measure(trial) > limit:
+                lines.append(current)
+                current = char
+            else:
+                current = trial
+        if current:
+            lines.append(current)
+        return lines
+
+    def _scroll_transcript(self, event):
+        if self._sheet.ready:
+            self._scroll = max(0.0, self._scroll - event.delta / 120)
+            self._sheet.follow(self._scroll)
+            self._redraw_caption()
+        return "break"
 
     def _stop_worker(self):
         self.stop_listen.set()
         self.listening = False
+        self._stop_crawl()
         self._show_listen_button(False)
         self.status.set("已停止。")
         self._paint_ball()
@@ -542,17 +619,15 @@ class Overlay:
                 self.debug.add(wall, mono, kind, tuple(payload))
                 if kind == "caption":
                     zh, source = payload
-                    self._show_caption(zh, source)
-                    if self.keep_records and self.record_dir_name:
-                        self.status.set(f"正在听，保存到 {self.record_dir_name}")
-                    else:
-                        self.status.set("正在听。")
+                    self._show_caption(zh, source, True)
+                    self.status.set("正在听。")
                 elif kind == "live":
                     zh, source = payload
-                    self._show_caption(zh, source)
+                    self._show_caption(zh, source, False)
                 elif kind == "status":
                     self.status.set(payload[0])
                 elif kind == "stopped":
+                    self._stop_crawl()
                     if self.listening:
                         self.listening = False
                         self._show_listen_button(False)
@@ -606,8 +681,13 @@ class Overlay:
             self.capture.quiet_after = seconds
         self._save()
 
-    def _toggle_keep(self):
-        self.keep_records = bool(self.keep.get())
+    def _step_speed(self, delta: int) -> None:
+        index = _SPEEDS.index(self._crawl_speed)
+        value = _SPEEDS[min(len(_SPEEDS) - 1, max(0, index + delta))]
+        if value == self._crawl_speed:
+            return
+        self._crawl_speed = value
+        self.speed_label.set(str(value))
         self._save()
 
     def _apply_languages(self, _choice=None):
@@ -621,7 +701,7 @@ class Overlay:
         self.state["provider"] = "qwen" if self.provider.get() == "千问" else "gemini"
         self.state["source_lang"] = heard.id
         self.state["target_lang"] = written.id
-        self.state["save"] = self.keep_records
+        self.state["speed"] = self._crawl_speed
         self.state["quiet"] = int(quiet_seconds(self.quiet_label.get()))
         self.state["collapsed"] = self.collapsed
         self.state["x"] = self._x
@@ -631,9 +711,7 @@ class Overlay:
         save_state(self.state)
 
     def close(self):
-        if self._caption_job is not None:
-            self.root.after_cancel(self._caption_job)
-            self._caption_job = None
+        self._stop_crawl()
         self.stop_listen.set()
         if self.capture is not None:
             self.capture.stop()
@@ -646,6 +724,14 @@ class Overlay:
 
 def _provider_label(name: str) -> str:
     return "千问" if (name or "").lower() == "qwen" else "Gemini"
+
+
+def _crawl_speed(value) -> int:
+    try:
+        speed = int(value)
+    except (TypeError, ValueError):
+        return _SPEEDS[0]
+    return min(_SPEEDS, key=lambda item: abs(item - speed))
 
 
 def main():

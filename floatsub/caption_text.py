@@ -50,6 +50,124 @@ def _weight(text: str) -> float:
     return sum(_unit(char) for char in text)
 
 
+class CrawlSheet:
+    """字幕按固定速度上移。停顿补空行，多出来的句子排在下面。"""
+
+    def __init__(self, view_lines: int = 3):
+        self.view_lines = view_lines
+        self.lines: list[str] = []
+        self.scroll = 0.0
+        self.ready = False
+
+    def reset(self) -> None:
+        self.lines.clear()
+        self.scroll = 0.0
+        self.ready = False
+
+    def append_rows(self, rows: list[tuple[str, str]]) -> None:
+        fresh = [(left, right) for left, right in rows if left or right]
+        if not fresh:
+            return
+        if not self.ready:
+            self.lines.extend([""] * max(0, self.view_lines - 1))
+            self.ready = True
+        self.lines.extend(fresh)
+
+    def append_lines(self, lines: list[str]) -> None:
+        fresh = [line for line in lines if line]
+        if not fresh:
+            return
+        if not self.ready:
+            self.lines.extend([""] * max(0, self.view_lines - 1))
+            self.ready = True
+        self.lines.extend(fresh)
+
+    def tick(self, line_delta: float) -> None:
+        if not self.ready or line_delta <= 0:
+            return
+        self.follow(self.scroll + line_delta)
+
+    def follow(self, scroll: float) -> None:
+        if not self.ready:
+            return
+        self.scroll = max(0.0, scroll)
+        while self.scroll + self.view_lines > len(self.lines):
+            self.lines.append("")
+
+
+def zip_lines(left: list[str], right: list[str]) -> list[tuple[str, str]]:
+    """同一句的译文和原文并成同一行。短的那一边用空行补齐。"""
+    count = max(len(left), len(right))
+    rows = []
+    for index in range(count):
+        rows.append((left[index] if index < len(left) else "", right[index] if index < len(right) else ""))
+    return rows
+
+
+def _join_paragraph(left: str, right: str) -> str:
+    """新的一句接在最后一段后面。中文直接接上，英文词之间补一个空格。"""
+    if not left:
+        return right
+    if not right:
+        return left
+    if left[-1].isspace() or right[0].isspace():
+        return left + right
+    if ord(left[-1]) < 128 and ord(right[0]) < 128:
+        return left + " " + right
+    return left + right
+
+
+class SentenceLog:
+    """整段译文都留下。没说完的半句先不放出来。"""
+
+    def __init__(self):
+        self.transcript = ""
+        self.utterance = ""
+        self.taken = 0
+
+    def reset(self) -> None:
+        self.transcript = ""
+        self.utterance = ""
+        self.taken = 0
+
+    def push(self, text: str, closed: bool = False) -> str:
+        text = (text or "").replace("\r", "").strip()
+        if not text:
+            return ""
+        self._follow(text)
+        end = len(self.utterance) if closed else _break_end(self.utterance)
+        if end <= self.taken:
+            if closed:
+                self.utterance = ""
+                self.taken = 0
+            return ""
+        piece = self.utterance[self.taken : end].strip()
+        self.taken = end
+        if closed:
+            self.utterance = ""
+            self.taken = 0
+        if not piece:
+            return ""
+        before = self.transcript
+        self.transcript = _join_paragraph(before, piece)
+        return self.transcript[len(before) :]
+
+    def _follow(self, text: str) -> None:
+        if not self.utterance or text.startswith(self.utterance):
+            self.utterance = text
+            return
+        if self.utterance.startswith(text):
+            self.utterance = text
+            self.taken = min(self.taken, len(text))
+            return
+        kept = self.utterance[: self.taken]
+        if kept and text.startswith(kept):
+            self.utterance = text
+            return
+        self.utterance = text
+        self.taken = 0
+
+
 def _ends_sentence(text: str) -> bool:
     if not text:
         return False
