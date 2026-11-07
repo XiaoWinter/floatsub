@@ -24,7 +24,6 @@ from floatsub.chrome import (
 from floatsub.glass import apply_blur, clear_blur, clear_region, disc_bgra, move_window, place_window, show_layered, window_handle
 from floatsub.config import load_state, save_state, settings
 from floatsub.engines import CaptionError, make_engine
-from floatsub import shanghai
 from floatsub.languages import INPUT_LANGUAGES, OUTPUT_LANGUAGES, find_language
 from floatsub.quiet import quiet_label, quiet_seconds
 from floatsub.sessions import playing_apps
@@ -405,8 +404,7 @@ class Overlay:
             return
         provider = "qwen" if self.provider.get() == "千问" else "gemini"
         engine = make_engine(provider)
-        shanghai_mode = self.languages[0].id == "wuu"
-        missing = shanghai.ready() if shanghai_mode else engine.ready()
+        missing = engine.ready()
         if missing:
             self.status.set(missing)
             return
@@ -415,12 +413,7 @@ class Overlay:
         self.record_dir_name = ""
         self._show_listen_button(True)
         self._paint_ball()
-        if shanghai_mode:
-            self.status.set(f"正在听 {target.name}。按上海话识别，再译成{self.languages[1].label}。")
-        elif self.languages[0].id == "yue":
-            self.status.set(f"正在听 {target.name}。会自己判断语言，不单独识别粤语。")
-        else:
-            self.status.set(f"正在听 {target.name}。字幕跟着说话走。")
+        self.status.set(f"正在听 {target.name}。字幕跟着说话走。")
         self.translation.set("")
         self.source.set("")
         self._translation_page.reset()
@@ -456,8 +449,7 @@ class Overlay:
                     self.inbox.put(("error", capture.error))
                     break
                 try:
-                    runner = shanghai.run_live if self.languages[0].id == "wuu" else engine.run_live
-                    reason = runner(
+                    reason = engine.run_live(
                         capture.pcm,
                         self.stop_listen,
                         self.inbox,
@@ -472,11 +464,8 @@ class Overlay:
                     break
                 if self.stop_listen.is_set() or reason == "stop":
                     if reason == "stop" and not self.stop_listen.is_set():
-                        if self.languages[0].id == "wuu":
-                            self.inbox.put(("error", "上海话识别断开了。"))
-                        else:
-                            name = "Gemini" if provider == "gemini" else "千问"
-                            self.inbox.put(("error", f"{name} 实时翻译断开了。"))
+                        name = "Gemini" if provider == "gemini" else "千问"
+                        self.inbox.put(("error", f"{name} 实时翻译断开了。"))
                     break
                 if reason == "retarget":
                     self.inbox.put(("status", "换成新的字幕语言，重新接上。"))
